@@ -1,0 +1,31 @@
+# Build artifacts
+.build/
+*.o
+*.dSYM/
+
+# Executables
+records
+records.exe
+
+# Jai temporary files
+*.jai.tmp
+
+# macOS
+.DS_Store
+
+# Editor files
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+
+# Cached artwork (large binary files)
+data/artwork/*.jpg
+data/artwork/*.png
+
+# Keep the artwork directory structure
+!data/artwork/.gitkeep
+
+# Database (optional - uncomment if you don't want to track the db)
+# data/records.db
