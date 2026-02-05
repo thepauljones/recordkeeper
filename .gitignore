@@ -24,6 +24,9 @@ records.exe
 data/artwork/*.jpg
 data/artwork/*.png
 
+# No need to save the actual databasee
+data/*.db
+
 # Keep the artwork directory structure
 !data/artwork/.gitkeep
 
