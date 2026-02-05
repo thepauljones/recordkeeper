@@ -1,0 +1,42 @@
+// Build script for Record Collection Manager
+// Run with: jai first.jai
+
+#import "Basic";
+#import "Compiler";
+#import "File";
+
+build :: () {
+    w := compiler_create_workspace("RecordManager");
+    if !w {
+        print("Workspace creation failed!\n");
+        return;
+    }
+
+    options := get_build_options(w);
+    options.output_executable_name = "records";
+
+    // Import paths - add our local modules directory
+    import_path: [..] string;
+    array_add(*import_path, "modules");  // Our custom modules (SQLite)
+    array_add(*import_path, ..options.import_path);  // Default paths
+    options.import_path = import_path;
+
+    #if OS == .MACOS {
+        options.minimum_os_version = .{11, 0};  // Big Sur+ for Apple Silicon
+    }
+
+    set_build_options(options, w);
+
+    compiler_begin_intercept(w);
+    add_build_file("src/main.jai", w);
+
+    // Wait for compilation to finish
+    while true {
+        message := compiler_wait_for_message();
+        if message.kind == .COMPLETE break;
+    }
+
+    compiler_end_intercept(w);
+}
+
+#run build();
