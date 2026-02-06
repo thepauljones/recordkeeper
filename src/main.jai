@@ -17,8 +17,8 @@ Curl :: #import "Curl";
 
 // Window state
 window: Window_Type;
-window_width:  s32 = 1280;
-window_height: s32 = 800;
+window_width:  s32 = 2520;
+window_height: s32 = 1480;
 
 current_time: float64;
 last_time: float64;
