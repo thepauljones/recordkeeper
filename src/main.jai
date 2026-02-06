@@ -84,8 +84,37 @@ artwork_results: [..] Artwork_Result;
 artwork_search_record_id: int;  // Which record we're finding artwork for
 artwork_search_pending: bool;   // True when search needs to run (allows UI to show loading first)
 artwork_scroll_value: float;
+selected_artwork_index: int = -1;  // Which artwork result is highlighted (-1 = none)
+artwork_search_text: string;  // Editable search term for artwork lookup
 
 edit_mode: Edit_Mode = .NONE;
+edit_mode_just_opened: bool = false;  // Prevents same-frame click-through on dialog buttons
+
+// Form field focus for tab navigation
+focused_field: int = 1;  // Which form field has focus (1=Number, 2=Artist, 3=Title, 4=Genre, 5=Year)
+
+// Sort mode
+Sort_Mode :: enum {
+    ARTIST_AZ;
+    ARTIST_ZA;
+    YEAR_NEWEST;
+    YEAR_OLDEST;
+}
+
+sort_mode: Sort_Mode = .ARTIST_AZ;
+
+// Collection statistics cache
+Collection_Stats :: struct {
+    total_records: int;
+    unique_artists: int;
+    year_min: int;
+    year_max: int;
+    top_genres: [5] string;
+    top_genre_count: int;
+    dirty: bool;  // needs recalculation
+}
+
+collection_stats: Collection_Stats;
 
 // Form fields for add/edit
 form_number: string;
@@ -137,6 +166,9 @@ main :: () {
     // Get initial record count
     get_total_record_count();
 
+    // Mark stats as dirty for initial calculation
+    collection_stats.dirty = true;
+
     // Create window
     window = create_window(window_width, window_height, "Record Collection Manager");
     Simp.set_render_target(window);
@@ -156,6 +188,7 @@ main :: () {
     form_title = copy_string("");
     form_genre = copy_string("");
     form_year = copy_string("");
+    artwork_search_text = copy_string("");
 
     // Main loop
     quit := false;
@@ -181,8 +214,8 @@ main :: () {
             if event.type == .QUIT then quit = true;
             getrect_handle_event(event);
 
-            if event.type == .KEYBOARD {
-                if event.key_pressed && event.key_code == .ESCAPE {
+            if event.type == .KEYBOARD && event.key_pressed {
+                if event.key_code == .ESCAPE {
                     if edit_mode != .NONE {
                         // Close dialog
                         edit_mode = .NONE;
@@ -191,6 +224,24 @@ main :: () {
                         selected_index = -1;
                     } else {
                         active_widget_deactivate_all();
+                    }
+                }
+
+                // Arrow key navigation in record list (only when no dialog open)
+                if edit_mode == .NONE {
+                    if event.key_code == .ARROW_DOWN {
+                        if search_results.count > 0 {
+                            selected_index = min(selected_index + 1, search_results.count - 1);
+                            scroll_to_selected();
+                        }
+                    }
+                    if event.key_code == .ARROW_UP {
+                        if selected_index > 0 {
+                            selected_index -= 1;
+                            scroll_to_selected();
+                        } else if selected_index == 0 {
+                            selected_index = -1;
+                        }
                     }
                 }
             }
@@ -267,13 +318,9 @@ draw_frame :: (dt: float) {
     right_panel_rect := get_rect(margin * 2 + left_panel_width, content_bottom, right_panel_width, content_height);
     draw_right_panel(right_panel_rect);
 
-    // Left footer (record count)
-    left_footer_rect := get_rect(margin, margin, left_panel_width, footer_height);
-    draw_footer(left_footer_rect);
-
-    // Right footer (record count)
-    right_footer_rect := get_rect(margin * 2 + left_panel_width, margin, right_panel_width, footer_height);
-    draw_footer(right_footer_rect);
+    // Single footer spanning full width
+    footer_rect := get_rect(margin, margin, cast(float)window_width - margin * 2, footer_height);
+    draw_footer(footer_rect);
 
     // Draw edit dialog if in edit mode
     if edit_mode != .NONE {
@@ -285,14 +332,52 @@ draw_frame :: (dt: float) {
     Simp.swap_buffers(window);
 }
 
+get_sort_label :: () -> string {
+    if sort_mode == {
+        case .ARTIST_AZ;    return "Sort: A-Z";
+        case .ARTIST_ZA;    return "Sort: Z-A";
+        case .YEAR_NEWEST;  return "Sort: Newest";
+        case .YEAR_OLDEST;  return "Sort: Oldest";
+    }
+    return "Sort";
+}
+
+cycle_sort_mode :: () {
+    if sort_mode == {
+        case .ARTIST_AZ;    sort_mode = .ARTIST_ZA;
+        case .ARTIST_ZA;    sort_mode = .YEAR_NEWEST;
+        case .YEAR_NEWEST;  sort_mode = .YEAR_OLDEST;
+        case .YEAR_OLDEST;  sort_mode = .ARTIST_AZ;
+    }
+    // Re-sort current results
+    if search_text.count >= 2 {
+        do_search(search_text);
+    } else {
+        load_all_records();
+    }
+}
+
 draw_top_bar :: (r: Rect) {
-    // Search field on left (~60%), Add button on right
-    search_width := r.w * 0.6;
+    // Search field on left (~50%), Sort button, Add button on right
+    search_width := r.w * 0.50;
+    sort_width := r.w * 0.15;
     button_width := r.w * 0.15;
 
     // Search bar
     search_rect := get_rect(r.x, r.y, search_width, r.h);
     draw_search_bar(search_rect);
+
+    // Sort button
+    sort_theme := my_theme.button_theme;
+    sort_theme.font = main_font;
+    sort_theme.surface_color = .{0.2, 0.2, 0.22, 1};
+    sort_theme.surface_color_over = .{0.25, 0.25, 0.28, 1};
+    sort_theme.text_color = COLOR_TEXT_PRIMARY;
+
+    sort_rect := get_rect(r.x + r.w - button_width - sort_width - r.w * 0.02, r.y, sort_width, r.h);
+    if button(sort_rect, get_sort_label(), *sort_theme, 300) {
+        cycle_sort_mode();
+    }
 
     // Add Record button (teal accent)
     button_theme := my_theme.button_theme;
@@ -305,7 +390,9 @@ draw_top_bar :: (r: Rect) {
     add_btn_rect := get_rect(r.x + r.w - button_width, r.y, button_width, r.h);
     if button(add_btn_rect, "+ Add Record", *button_theme) {
         clear_form();
+        focused_field = 1;
         edit_mode = .ADD;
+        edit_mode_just_opened = true;
     }
 }
 
@@ -345,7 +432,6 @@ draw_search_bar :: (r: Rect) {
         if search_text.count >= 2 {
             do_search(search_text);
         } else {
-            // Clear results
             clear_search_results();
         }
     }
@@ -360,6 +446,14 @@ clear_search_results :: () {
         if it.artwork_path.data free(it.artwork_path.data);
     }
     search_results.count = 0;
+}
+
+scroll_to_selected :: () {
+    if selected_index < 0 return;
+    // Approximate row height and adjust scroll to keep selection visible
+    row_height := cast(float)main_font.character_height * 2.8;
+    target := cast(float)selected_index * row_height;
+    search_scroll_value = target;
 }
 
 draw_left_panel :: (r: Rect) {
@@ -409,6 +503,32 @@ draw_results :: (r: Rect) {
     end_scrollable_region(region, s.x + s.w, s.y, *search_scroll_value);
 }
 
+draw_rounded_corner_mask :: (r: Rect, radius: float, bg: Vector4) {
+    // Approximate rounded corners by drawing bg-colored strips that mask the image corners
+    // Uses horizontal strips at each corner to carve out a rounded shape
+    Simp.set_shader_for_color();
+    steps :: 8;
+    for i: 0..steps-1 {
+        // Calculate how much to inset at this vertical position in the corner
+        t := cast(float)(i + 1) / cast(float)steps;
+        y_offset := radius * t;
+        // Circle equation: x = radius - sqrt(radius^2 - (radius - y_offset)^2)
+        dy := radius - y_offset;
+        x_inset := radius - cast(float)sqrt(cast(float64)(radius * radius - dy * dy));
+        strip_h := radius / cast(float)steps;
+        strip_y := y_offset - strip_h;
+
+        // Bottom-left corner
+        Simp.immediate_quad(r.x, r.y + strip_y, r.x + x_inset, r.y + strip_y + strip_h, bg);
+        // Bottom-right corner
+        Simp.immediate_quad(r.x + r.w - x_inset, r.y + strip_y, r.x + r.w, r.y + strip_y + strip_h, bg);
+        // Top-left corner
+        Simp.immediate_quad(r.x, r.y + r.h - strip_y - strip_h, r.x + x_inset, r.y + r.h - strip_y, bg);
+        // Top-right corner
+        Simp.immediate_quad(r.x + r.w - x_inset, r.y + r.h - strip_y - strip_h, r.x + r.w, r.y + r.h - strip_y, bg);
+    }
+}
+
 draw_artwork_placeholder :: (r: Rect) {
     // Draw dark rectangle with "No Artwork" text
     Simp.set_shader_for_color();
@@ -445,12 +565,124 @@ draw_right_panel :: (r: Rect) {
     }
 }
 
+calculate_collection_stats :: () {
+    if !collection_stats.dirty return;
+    collection_stats.dirty = false;
+
+    // Total records
+    collection_stats.total_records = total_record_count;
+
+    // Unique artists
+    {
+        sql := "SELECT COUNT(DISTINCT artist) FROM records";
+        stmt: *SQLite.sqlite3_stmt;
+        result := SQLite.sqlite3_prepare_v2(db, sql.data, cast(s32)sql.count, *stmt, null);
+        if result == SQLite.SQLITE_OK {
+            defer SQLite.sqlite3_finalize(stmt);
+            if SQLite.sqlite3_step(stmt) == SQLite.SQLITE_ROW {
+                collection_stats.unique_artists = SQLite.sqlite3_column_int(stmt, 0);
+            }
+        }
+    }
+
+    // Year range
+    {
+        sql := "SELECT MIN(year), MAX(year) FROM records WHERE year > 0";
+        stmt: *SQLite.sqlite3_stmt;
+        result := SQLite.sqlite3_prepare_v2(db, sql.data, cast(s32)sql.count, *stmt, null);
+        if result == SQLite.SQLITE_OK {
+            defer SQLite.sqlite3_finalize(stmt);
+            if SQLite.sqlite3_step(stmt) == SQLite.SQLITE_ROW {
+                collection_stats.year_min = SQLite.sqlite3_column_int(stmt, 0);
+                collection_stats.year_max = SQLite.sqlite3_column_int(stmt, 1);
+            }
+        }
+    }
+
+    // Top genres
+    {
+        // Free old genre strings
+        for i: 0..collection_stats.top_genre_count-1 {
+            if collection_stats.top_genres[i].data free(collection_stats.top_genres[i].data);
+            collection_stats.top_genres[i] = "";
+        }
+        collection_stats.top_genre_count = 0;
+
+        sql := "SELECT genre, COUNT(*) as cnt FROM records WHERE genre != '' GROUP BY genre ORDER BY cnt DESC LIMIT 5";
+        stmt: *SQLite.sqlite3_stmt;
+        result := SQLite.sqlite3_prepare_v2(db, sql.data, cast(s32)sql.count, *stmt, null);
+        if result == SQLite.SQLITE_OK {
+            defer SQLite.sqlite3_finalize(stmt);
+            while SQLite.sqlite3_step(stmt) == SQLite.SQLITE_ROW && collection_stats.top_genre_count < 5 {
+                genre_ptr := SQLite.sqlite3_column_text(stmt, 0);
+                if genre_ptr {
+                    collection_stats.top_genres[collection_stats.top_genre_count] = copy_string(to_string(genre_ptr));
+                    collection_stats.top_genre_count += 1;
+                }
+            }
+        }
+    }
+}
+
 draw_detail_placeholder :: (r: Rect) {
+    // Recalculate stats if needed
+    calculate_collection_stats();
+
+    margin := r.w * 0.08;
+    inner := shrink(r, margin);
+
     label_theme := my_theme.label_theme;
-    label_theme.font = main_font;
+    label_theme.font = title_font;
     label_theme.alignment = .Center;
-    label_theme.text_color = COLOR_TEXT_SECONDARY;
-    label(r, "Select a record to view details", *label_theme);
+    label_theme.text_color = COLOR_TEXT_PRIMARY;
+
+    current_y := inner.y + inner.h - cast(float)title_font.character_height * 2;
+    line_h := cast(float)title_font.character_height * 1.5;
+
+    // Title
+    title_rect := get_rect(inner.x, current_y, inner.w, line_h);
+    label(title_rect, "Collection", *label_theme);
+    current_y -= line_h * 1.5;
+
+    // Stats using main_font
+    stat_theme := my_theme.label_theme;
+    stat_theme.font = main_font;
+    stat_theme.alignment = .Center;
+    stat_theme.text_color = COLOR_TEXT_SECONDARY;
+    stat_h := cast(float)main_font.character_height * 1.8;
+
+    // Total records
+    stat_rect := get_rect(inner.x, current_y, inner.w, stat_h);
+    label(stat_rect, tprint("% records", collection_stats.total_records), *stat_theme);
+    current_y -= stat_h;
+
+    // Unique artists
+    stat_rect = get_rect(inner.x, current_y, inner.w, stat_h);
+    label(stat_rect, tprint("% artists", collection_stats.unique_artists), *stat_theme);
+    current_y -= stat_h;
+
+    // Year range
+    if collection_stats.year_min > 0 && collection_stats.year_max > 0 {
+        stat_rect = get_rect(inner.x, current_y, inner.w, stat_h);
+        label(stat_rect, tprint("% - %", collection_stats.year_min, collection_stats.year_max), *stat_theme);
+        current_y -= stat_h;
+    }
+
+    // Top genres
+    if collection_stats.top_genre_count > 0 {
+        current_y -= stat_h * 0.5;  // Extra spacing
+        stat_rect = get_rect(inner.x, current_y, inner.w, stat_h);
+        stat_theme.text_color = COLOR_TEXT_PRIMARY;
+        label(stat_rect, "Top Genres", *stat_theme);
+        current_y -= stat_h;
+
+        stat_theme.text_color = COLOR_TEXT_SECONDARY;
+        for i: 0..collection_stats.top_genre_count-1 {
+            stat_rect = get_rect(inner.x, current_y, inner.w, stat_h);
+            label(stat_rect, collection_stats.top_genres[i], *stat_theme);
+            current_y -= stat_h;
+        }
+    }
 }
 
 draw_detail_panel :: (r: Rect, record: Record) {
@@ -485,8 +717,24 @@ draw_detail_panel :: (r: Rect, record: Record) {
     artwork_rect := get_rect(artwork_x, artwork_y, artwork_size, artwork_size);
 
     // Draw artwork or placeholder
-    if record.artwork_path.count > 0 {
-        texture := get_artwork_texture(record.id, record.artwork_path);
+    // Try explicit path first, then auto-detect from data/artwork/<id>.*
+    effective_artwork_path := record.artwork_path;
+    if effective_artwork_path.count == 0 {
+        // Try common image extensions
+        extensions :: string.["jpg", "jpeg", "png"];
+        for ext: extensions {
+            auto_path := tprint("data/artwork/%.%", record.id, ext);
+            if file_exists(auto_path) {
+                effective_artwork_path = auto_path;
+                // Persist to database so we don't re-detect every frame
+                update_record_artwork(record.id, auto_path);
+                break;
+            }
+        }
+    }
+
+    if effective_artwork_path.count > 0 {
+        texture := get_artwork_texture(record.id, effective_artwork_path);
         if texture && texture.width > 0 {
             Simp.set_shader_for_images(texture);
             pa, pb, pc, pd := get_quad(artwork_rect);
@@ -547,7 +795,9 @@ draw_detail_panel :: (r: Rect, record: Record) {
     edit_rect := get_rect(inner.x + inner.w * 0.5 - button_w - button_spacing * 0.5, button_y, button_w, button_h);
     if button(edit_rect, "Edit", *edit_theme, 200) {
         load_record_to_form(record);
+        focused_field = 1;
         edit_mode = .EDIT;
+        edit_mode_just_opened = true;
     }
 
     // Delete button (teal accent)
@@ -560,6 +810,7 @@ draw_detail_panel :: (r: Rect, record: Record) {
     delete_rect := get_rect(inner.x + inner.w * 0.5 + button_spacing * 0.5, button_y, button_w, button_h);
     if button(delete_rect, "Delete", *delete_theme, 201) {
         edit_mode = .DELETE_CONFIRM;
+        edit_mode_just_opened = true;
     }
 }
 
@@ -588,7 +839,7 @@ draw_record_row :: (r: Rect, record: Record, label_theme: *Label_Theme, small_th
     button_theme.frame_color = .{0, 0, 0, 0};
     button_theme.text_color = .{0, 0, 0, 0};
 
-    if button(r, "", *button_theme, index) {
+    if button(r, "", *button_theme, index + 1000) {
         selected_index = index;
     }
 
@@ -669,7 +920,8 @@ do_search :: (query: string) {
     search_results.count = 0;
 
     // Build query - search artist and title (case insensitive)
-    sql := tprint("SELECT id, number, artist, title, genre, year, artwork_path FROM records WHERE artist LIKE '\%%\%' OR title LIKE '\%%\%' ORDER BY artist, title", query, query);
+    order_by := get_order_by_clause();
+    sql := tprint("SELECT id, number, artist, title, genre, year, artwork_path FROM records WHERE artist LIKE '\%%\%' OR title LIKE '\%%\%' %", query, query, order_by);
 
     stmt: *SQLite.sqlite3_stmt;
     result := SQLite.sqlite3_prepare_v2(db, sql.data, cast(s32)sql.count, *stmt, null);
@@ -703,6 +955,63 @@ do_search :: (query: string) {
     }
 
     print("Found % results for '%'\n", search_results.count, query);
+}
+
+get_order_by_clause :: () -> string {
+    if sort_mode == {
+        case .ARTIST_AZ;    return "ORDER BY artist COLLATE NOCASE, title COLLATE NOCASE";
+        case .ARTIST_ZA;    return "ORDER BY artist COLLATE NOCASE DESC, title COLLATE NOCASE";
+        case .YEAR_NEWEST;  return "ORDER BY year DESC, artist COLLATE NOCASE";
+        case .YEAR_OLDEST;  return "ORDER BY year ASC, artist COLLATE NOCASE";
+    }
+    return "ORDER BY artist COLLATE NOCASE, title COLLATE NOCASE";
+}
+
+load_all_records :: () {
+    // Clear previous results
+    for * search_results {
+        if it.number.data free(it.number.data);
+        if it.artist.data free(it.artist.data);
+        if it.title.data  free(it.title.data);
+        if it.genre.data  free(it.genre.data);
+        if it.artwork_path.data free(it.artwork_path.data);
+    }
+    search_results.count = 0;
+
+    order_by := get_order_by_clause();
+    sql := tprint("SELECT id, number, artist, title, genre, year, artwork_path FROM records %", order_by);
+
+    stmt: *SQLite.sqlite3_stmt;
+    result := SQLite.sqlite3_prepare_v2(db, sql.data, cast(s32)sql.count, *stmt, null);
+
+    if result != SQLite.SQLITE_OK {
+        print("SQL error: %\n", result);
+        return;
+    }
+
+    defer SQLite.sqlite3_finalize(stmt);
+
+    while SQLite.sqlite3_step(stmt) == SQLite.SQLITE_ROW {
+        record: Record;
+        record.id = SQLite.sqlite3_column_int(stmt, 0);
+
+        number_ptr := SQLite.sqlite3_column_text(stmt, 1);
+        artist_ptr := SQLite.sqlite3_column_text(stmt, 2);
+        title_ptr  := SQLite.sqlite3_column_text(stmt, 3);
+        genre_ptr  := SQLite.sqlite3_column_text(stmt, 4);
+        record.year = SQLite.sqlite3_column_int(stmt, 5);
+        artwork_ptr := SQLite.sqlite3_column_text(stmt, 6);
+
+        if number_ptr record.number = copy_string(to_string(number_ptr));
+        if artist_ptr record.artist = copy_string(to_string(artist_ptr));
+        if title_ptr  record.title  = copy_string(to_string(title_ptr));
+        if genre_ptr  record.genre  = copy_string(to_string(genre_ptr));
+        if artwork_ptr record.artwork_path = copy_string(to_string(artwork_ptr));
+
+        array_add(*search_results, record);
+    }
+
+    print("Loaded % records\n", search_results.count);
 }
 
 // Form helper functions
@@ -763,6 +1072,13 @@ draw_edit_dialog :: () {
     Simp.immediate_quad(.{dialog_rect.x, dialog_rect.y + dialog_rect.h - border}, .{dialog_rect.x + dialog_rect.w, dialog_rect.y + dialog_rect.h - border}, .{dialog_rect.x + dialog_rect.w, dialog_rect.y + dialog_rect.h}, .{dialog_rect.x, dialog_rect.y + dialog_rect.h}, border_color);
     Simp.immediate_quad(.{dialog_rect.x, dialog_rect.y}, .{dialog_rect.x + border, dialog_rect.y}, .{dialog_rect.x + border, dialog_rect.y + dialog_rect.h}, .{dialog_rect.x, dialog_rect.y + dialog_rect.h}, border_color);
     Simp.immediate_quad(.{dialog_rect.x + dialog_rect.w - border, dialog_rect.y}, .{dialog_rect.x + dialog_rect.w, dialog_rect.y}, .{dialog_rect.x + dialog_rect.w, dialog_rect.y + dialog_rect.h}, .{dialog_rect.x + dialog_rect.w - border, dialog_rect.y + dialog_rect.h}, border_color);
+
+    // Skip drawing interactive content on the frame the dialog was just opened
+    // to prevent same-frame click-through from the button that opened it
+    if edit_mode_just_opened {
+        edit_mode_just_opened = false;
+        return;
+    }
 
     if edit_mode == .DELETE_CONFIRM {
         draw_delete_confirm_dialog(dialog_rect);
@@ -827,9 +1143,10 @@ draw_delete_confirm_dialog :: (dialog_rect: Rect) {
             if search_text.count >= 2 {
                 do_search(search_text);
             } else {
-                clear_search_results();
+                load_all_records();
             }
             selected_index = -1;
+            collection_stats.dirty = true;
         }
         edit_mode = .NONE;
     }
@@ -885,6 +1202,19 @@ draw_add_edit_dialog :: (dialog_rect: Rect) {
     draw_form_field(inner.x, current_y, label_width, input_width, field_height, "Year:", *form_year, *label_theme, *text_theme, 5);
     current_y -= field_height + field_spacing;
 
+    // Handle Tab / Shift+Tab to cycle through form fields
+    for Input.events_this_frame {
+        if it.type == .KEYBOARD && it.key_pressed && it.key_code == .TAB {
+            if it.shift_pressed {
+                focused_field -= 1;
+                if focused_field < 1 focused_field = 5;
+            } else {
+                focused_field += 1;
+                if focused_field > 5 focused_field = 1;
+            }
+        }
+    }
+
     // Find Artwork button (only in edit mode for existing records)
     // Positioned below the Year field
     button_theme := my_theme.button_theme;
@@ -899,6 +1229,10 @@ draw_add_edit_dialog :: (dialog_rect: Rect) {
             // Start artwork search - set pending flag so UI shows loading first
             artwork_search_record_id = form_id;
             artwork_search_pending = true;
+            selected_artwork_index = -1;
+            // Pre-fill search term with artist + title
+            if artwork_search_text.data free(artwork_search_text.data);
+            artwork_search_text = copy_string(tprint("% %", form_artist, form_title));
             edit_mode = .ARTWORK_SEARCH;
         }
     }
@@ -929,7 +1263,27 @@ draw_form_field :: (x: float, y: float, label_width: float, input_width: float, 
 
     // Input
     input_rect := get_rect(x + label_width, y, input_width, height);
+
+    // Draw teal highlight border around the focused field
+    if identifier == focused_field {
+        Simp.set_shader_for_color();
+        border := 2.0;
+        // Bottom edge
+        Simp.immediate_quad(.{input_rect.x, input_rect.y}, .{input_rect.x + input_rect.w, input_rect.y}, .{input_rect.x + input_rect.w, input_rect.y + border}, .{input_rect.x, input_rect.y + border}, COLOR_ACCENT);
+        // Top edge
+        Simp.immediate_quad(.{input_rect.x, input_rect.y + input_rect.h - border}, .{input_rect.x + input_rect.w, input_rect.y + input_rect.h - border}, .{input_rect.x + input_rect.w, input_rect.y + input_rect.h}, .{input_rect.x, input_rect.y + input_rect.h}, COLOR_ACCENT);
+        // Left edge
+        Simp.immediate_quad(.{input_rect.x, input_rect.y}, .{input_rect.x + border, input_rect.y}, .{input_rect.x + border, input_rect.y + input_rect.h}, .{input_rect.x, input_rect.y + input_rect.h}, COLOR_ACCENT);
+        // Right edge
+        Simp.immediate_quad(.{input_rect.x + input_rect.w - border, input_rect.y}, .{input_rect.x + input_rect.w, input_rect.y}, .{input_rect.x + input_rect.w, input_rect.y + input_rect.h}, .{input_rect.x + input_rect.w - border, input_rect.y + input_rect.h}, COLOR_ACCENT);
+    }
+
     action, new_text, state := text_input(input_rect, field.*, text_theme, identifier);
+
+    // Update focused_field when user clicks/interacts with this field
+    if action {
+        focused_field = identifier;
+    }
 
     if action & .TEXT_MODIFIED {
         set_form_field(field, state.text);
@@ -957,9 +1311,10 @@ save_record :: () {
     if search_text.count >= 2 {
         do_search(search_text);
     } else {
-        clear_search_results();
+        load_all_records();
     }
     selected_index = -1;
+    collection_stats.dirty = true;
 }
 
 // Database operations
@@ -1078,8 +1433,46 @@ draw_artwork_search_dialog :: (dialog_rect: Rect) {
     label_theme.alignment = .Center;
     label(title_rect, "Select Artwork", *label_theme);
 
+    // Search bar for editing the search term
+    search_bar_h := cast(float)main_font.character_height * 1.8;
+    search_bar_y := title_rect.y - search_bar_h - margin * 0.5;
+    search_input_w := inner.w * 0.7;
+    search_btn_w := inner.w * 0.25;
+
+    search_input_rect := get_rect(inner.x, search_bar_y, search_input_w, search_bar_h);
+    text_theme := my_theme.text_input_theme;
+    text_theme.font = main_font;
+    action, new_text, search_state := text_input(search_input_rect, artwork_search_text, *text_theme, 500);
+    if action & .TEXT_MODIFIED {
+        if artwork_search_text.data free(artwork_search_text.data);
+        artwork_search_text = copy_string(search_state.text);
+    }
+    if action & .ENTERED {
+        if artwork_search_text.data free(artwork_search_text.data);
+        artwork_search_text = copy_string(new_text);
+    }
+
+    // Search button
+    search_btn_theme := my_theme.button_theme;
+    search_btn_theme.font = main_font;
+    search_btn_theme.surface_color = COLOR_ACCENT;
+    search_btn_theme.surface_color_over = COLOR_ACCENT_HOVER;
+    search_btn_theme.text_color = COLOR_TEXT_PRIMARY;
+
+    search_btn_rect := get_rect(inner.x + search_input_w + inner.w * 0.05, search_bar_y, search_btn_w, search_bar_h);
+    if button(search_btn_rect, "Search", *search_btn_theme, 501) {
+        artwork_search_pending = true;
+        selected_artwork_index = -1;
+    }
+
+    // Also trigger search on Enter
+    if action & .ENTERED {
+        artwork_search_pending = true;
+        selected_artwork_index = -1;
+    }
+
     // Artwork grid area
-    grid_top := title_rect.y - margin;
+    grid_top := search_bar_y - margin * 0.5;
     button_h := cast(float)main_font.character_height * 2;
     grid_bottom := inner.y + button_h + margin * 2;
     grid_rect := get_rect(inner.x, grid_bottom, inner.w, grid_top - grid_bottom);
@@ -1117,32 +1510,69 @@ draw_artwork_search_dialog :: (dialog_rect: Rect) {
             // Draw thumbnail
             thumb_rect := get_rect(current_x, current_y, thumb_size, thumb_size);
 
-            // Load texture if not loaded
-            if !it.texture_loaded && it.thumb_url.count > 0 {
-                load_artwork_thumbnail(it);
-            }
+            // Only draw if visible within the grid area
+            visible := (thumb_rect.y + thumb_rect.h > grid_bottom) && (thumb_rect.y < grid_top);
 
-            // Draw the image or placeholder
-            if it.texture_loaded && it.texture.width > 0 {
-                Simp.set_shader_for_images(*it.texture);
-                p0, p1, p2, p3 := get_quad(thumb_rect);
-                Simp.immediate_quad(p0, p1, p2, p3, .{1,1,1,1});
-            } else {
-                // Placeholder
-                Simp.set_shader_for_color();
-                p0, p1, p2, p3 := get_quad(thumb_rect);
-                Simp.immediate_quad(p0, p1, p2, p3, .{0.3, 0.3, 0.3, 1});
-            }
+            if visible {
+                // Clamp drawing to visible area
+                draw_rect := thumb_rect;
+                uv_y0 : float = 0;
+                uv_y1 : float = 1;
+                if draw_rect.y < grid_bottom {
+                    clipped := grid_bottom - draw_rect.y;
+                    uv_y0 = clipped / thumb_rect.h;
+                    draw_rect.h -= clipped;
+                    draw_rect.y = grid_bottom;
+                }
+                if draw_rect.y + draw_rect.h > grid_top {
+                    clipped := (draw_rect.y + draw_rect.h) - grid_top;
+                    uv_y1 = 1.0 - clipped / thumb_rect.h;
+                    draw_rect.h -= clipped;
+                }
 
-            // Clickable button overlay
-            button_theme.surface_color = .{0, 0, 0, 0};
-            button_theme.surface_color_over = .{1, 1, 1, 0.2};
-            button_theme.frame_color = .{0.5, 0.5, 0.5, 0.5};
-            button_theme.text_color = .{0, 0, 0, 0};
+                // Load texture if not loaded
+                if !it.texture_loaded && it.thumb_url.count > 0 {
+                    load_artwork_thumbnail(it);
+                }
 
-            if button(thumb_rect, "", *button_theme, it_index + 100) {
-                // Download full image and save
-                select_artwork(it);
+                // Draw the image or placeholder (clipped)
+                if it.texture_loaded && it.texture.width > 0 {
+                    Simp.set_shader_for_images(*it.texture);
+                    Simp.immediate_quad(
+                        .{draw_rect.x, draw_rect.y}, .{draw_rect.x + draw_rect.w, draw_rect.y},
+                        .{draw_rect.x + draw_rect.w, draw_rect.y + draw_rect.h}, .{draw_rect.x, draw_rect.y + draw_rect.h},
+                        .{1,1,1,1}, .{1,1,1,1}, .{1,1,1,1}, .{1,1,1,1},
+                        .{0, uv_y0}, .{1, uv_y0}, .{1, uv_y1}, .{0, uv_y1}
+                    );
+                } else {
+                    // Placeholder
+                    Simp.set_shader_for_color();
+                    p0, p1, p2, p3 := get_quad(draw_rect);
+                    Simp.immediate_quad(p0, p1, p2, p3, .{0.3, 0.3, 0.3, 1});
+                }
+
+                // Draw rounded corner masks
+                draw_rounded_corner_mask(draw_rect, 8.0, my_theme.background_color);
+
+                // Draw selection highlight if this is the selected artwork
+                if it_index == selected_artwork_index {
+                    Simp.set_shader_for_color();
+                    border := 3.0;
+                    Simp.immediate_quad(.{draw_rect.x, draw_rect.y}, .{draw_rect.x + draw_rect.w, draw_rect.y}, .{draw_rect.x + draw_rect.w, draw_rect.y + border}, .{draw_rect.x, draw_rect.y + border}, COLOR_ACCENT);
+                    Simp.immediate_quad(.{draw_rect.x, draw_rect.y + draw_rect.h - border}, .{draw_rect.x + draw_rect.w, draw_rect.y + draw_rect.h - border}, .{draw_rect.x + draw_rect.w, draw_rect.y + draw_rect.h}, .{draw_rect.x, draw_rect.y + draw_rect.h}, COLOR_ACCENT);
+                    Simp.immediate_quad(.{draw_rect.x, draw_rect.y}, .{draw_rect.x + border, draw_rect.y}, .{draw_rect.x + border, draw_rect.y + draw_rect.h}, .{draw_rect.x, draw_rect.y + draw_rect.h}, COLOR_ACCENT);
+                    Simp.immediate_quad(.{draw_rect.x + draw_rect.w - border, draw_rect.y}, .{draw_rect.x + draw_rect.w, draw_rect.y}, .{draw_rect.x + draw_rect.w, draw_rect.y + draw_rect.h}, .{draw_rect.x + draw_rect.w - border, draw_rect.y + draw_rect.h}, COLOR_ACCENT);
+                }
+
+                // Clickable button overlay - selects this artwork
+                button_theme.surface_color = .{0, 0, 0, 0};
+                button_theme.surface_color_over = .{1, 1, 1, 0.15};
+                button_theme.frame_color = .{0, 0, 0, 0};
+                button_theme.text_color = .{0, 0, 0, 0};
+
+                if button(draw_rect, "", *button_theme, it_index + 100) {
+                    selected_artwork_index = it_index;
+                }
             }
 
             col += 1;
@@ -1166,33 +1596,53 @@ draw_artwork_search_dialog :: (dialog_rect: Rect) {
     button_theme.font = main_font;
 
     button_w := inner.w * 0.3;
+    button_spacing := inner.w * 0.05;
     button_y := inner.y + margin;
 
     // Back button
-    back_rect := get_rect(inner.x + inner.w * 0.5 - button_w / 2, button_y, button_w, button_h);
-    if button(back_rect, "Back", *button_theme) {
+    back_rect := get_rect(inner.x + inner.w * 0.5 - button_w - button_spacing * 0.5, button_y, button_w, button_h);
+    if button(back_rect, "Back", *button_theme, 400) {
         clear_artwork_results();
+        selected_artwork_index = -1;
         artwork_search_pending = false;
         edit_mode = .EDIT;
     }
 
+    // Select button (teal, only active when an artwork is selected)
+    select_theme := button_theme;
+    if selected_artwork_index >= 0 && selected_artwork_index < artwork_results.count {
+        select_theme.surface_color = COLOR_ACCENT;
+        select_theme.surface_color_over = COLOR_ACCENT_HOVER;
+        select_theme.text_color = COLOR_TEXT_PRIMARY;
+    } else {
+        select_theme.surface_color = .{0.15, 0.15, 0.17, 1};
+        select_theme.text_color = COLOR_TEXT_SECONDARY;
+    }
+
+    select_rect := get_rect(inner.x + inner.w * 0.5 + button_spacing * 0.5, button_y, button_w, button_h);
+    if button(select_rect, "Select", *select_theme, 401) {
+        if selected_artwork_index >= 0 && selected_artwork_index < artwork_results.count {
+            select_artwork(*artwork_results[selected_artwork_index]);
+            selected_artwork_index = -1;
+        }
+    }
+
     // Perform deferred search after UI has rendered "Searching..." state
     if artwork_search_pending {
-        search_discogs_artwork(form_artist, form_title);
+        search_discogs_artwork();
         artwork_search_pending = false;
     }
 }
 
-search_discogs_artwork :: (artist: string, title: string) {
+search_discogs_artwork :: () {
     // Clear previous results
     clear_artwork_results();
 
-    // Combine artist and title for iTunes search
-    search_term := tprint("% %", artist, title);
-    encoded := url_encode(search_term);
+    if artwork_search_text.count == 0 return;
 
-    // iTunes Search API - no authentication required
-    url := tprint("https://itunes.apple.com/search?term=%&media=music&entity=album&limit=20", encoded);
+    // Use iTunes Search API - reliable, no auth, direct image URLs
+    encoded := url_encode(artwork_search_text);
+    url := tprint("https://itunes.apple.com/search?term=%&media=music&entity=album&limit=12", encoded);
 
     print("Searching iTunes: %\n", url);
 
@@ -1204,7 +1654,7 @@ search_discogs_artwork :: (artist: string, title: string) {
         return;
     }
 
-    // Parse JSON response for artwork URLs
+    // Parse iTunes JSON response
     parse_itunes_response(body);
 
     print("Found % artwork results\n", artwork_results.count);
@@ -1253,10 +1703,10 @@ curl_write_callback :: (ptr: *u8, size: u64, nmemb: u64, userdata: *void) -> u64
 
 parse_itunes_response :: (json: string) {
     // Parse iTunes Search API response
-    // Look for artworkUrl100 fields and extract artist/album info
+    // Each result has: artworkUrl100, artistName, collectionName
 
     pos := 0;
-    while pos < json.count && artwork_results.count < 20 {
+    while pos < json.count && artwork_results.count < 12 {
         // Find artworkUrl100 field
         artwork_key := find_substring(json, "\"artworkUrl100\":", pos);
         if artwork_key < 0 break;
@@ -1294,8 +1744,9 @@ parse_itunes_response :: (json: string) {
         }
 
         result: Artwork_Result;
-        result.thumb_url = artwork_url;
-        // Replace 100x100bb with 600x600bb for full size
+        // Thumb: 100x100 (original URL)
+        result.thumb_url = copy_string(artwork_url);
+        // Full: replace 100x100bb with 600x600bb for high-res
         result.cover_url = replace_artwork_size(artwork_url, "600x600bb");
 
         if artist_name.count > 0 && collection_name.count > 0 {
@@ -1306,6 +1757,7 @@ parse_itunes_response :: (json: string) {
             result.title = copy_string("Unknown Album");
         }
 
+        if artwork_url.data free(artwork_url);
         if artist_name.data free(artist_name);
         if collection_name.data free(collection_name);
 
@@ -1315,18 +1767,15 @@ parse_itunes_response :: (json: string) {
 }
 
 replace_artwork_size :: (url: string, new_size: string) -> string {
-    // iTunes URLs contain "100x100bb" - replace with new size (e.g., "600x600bb")
+    // iTunes URLs contain "100x100bb" - replace with new size
     size_pos := find_substring(url, "100x100bb");
     if size_pos < 0 return copy_string(url);
 
     builder: String_Builder;
-    // Part before the size
     for i: 0..size_pos-1 {
         append(*builder, url[i]);
     }
-    // New size
     append(*builder, new_size);
-    // Part after "100x100bb" (9 chars)
     for i: size_pos + 9 .. url.count-1 {
         append(*builder, url[i]);
     }
