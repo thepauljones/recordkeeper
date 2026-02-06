@@ -726,8 +726,14 @@ draw_detail_panel :: (r: Rect, record: Record) {
             auto_path := tprint("data/artwork/%.%", record.id, ext);
             if file_exists(auto_path) {
                 effective_artwork_path = auto_path;
-                // Persist to database so we don't re-detect every frame
-                update_record_artwork(record.id, auto_path);
+                // Persist to database and update in-memory record so we don't re-detect every frame
+                path_copy := copy_string(auto_path);
+                update_record_artwork(record.id, path_copy);
+                // Update the in-memory search result
+                if selected_index >= 0 && selected_index < search_results.count {
+                    if search_results[selected_index].artwork_path.data free(search_results[selected_index].artwork_path.data);
+                    search_results[selected_index].artwork_path = path_copy;
+                }
                 break;
             }
         }
@@ -1313,7 +1319,11 @@ save_record :: () {
     } else {
         load_all_records();
     }
-    selected_index = -1;
+    // Keep selected_index so the user can see their changes
+    // Clamp in case the list changed size
+    if selected_index >= search_results.count {
+        selected_index = search_results.count - 1;
+    }
     collection_stats.dirty = true;
 }
 
@@ -1927,13 +1937,28 @@ select_artwork :: (result: *Artwork_Result) {
     // Update database
     update_record_artwork(artwork_search_record_id, filename);
 
-    // Clear and go back
-    clear_artwork_results();
-    edit_mode = .EDIT;
+    // Invalidate artwork cache for this record so it reloads
+    for * artwork_cache {
+        if it.record_id == artwork_search_record_id {
+            it.loaded = false;
+            break;
+        }
+    }
 
-    // Refresh search
+    // Clear and close the dialog entirely - artwork is saved directly to DB
+    clear_artwork_results();
+    selected_artwork_index = -1;
+    edit_mode = .NONE;
+
+    // Refresh search results to show updated artwork
     if search_text.count >= 2 {
         do_search(search_text);
+    } else {
+        load_all_records();
+    }
+    // Keep selected_index so user can see the updated artwork
+    if selected_index >= search_results.count {
+        selected_index = search_results.count - 1;
     }
 }
 
