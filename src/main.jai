@@ -15,6 +15,8 @@ Curl :: #import "Curl";
 #import "File";
 #import "File_Utilities";
 
+#load "test.jai";
+
 // Window state
 window: Window_Type;
 window_width:  s32 = 2520;
@@ -144,8 +146,19 @@ main :: () {
         Windows.timeBeginPeriod(1);
     }
 
-    // Open database
+    // Parse command line flags
     db_path := "data/records.db";
+    args := get_command_line_arguments();
+    for i: 0..args.count-1 {
+        if args[i] == "--db" && i + 1 < args.count {
+            db_path = args[i + 1];
+        }
+        if args[i] == "--test" {
+            test_mode = true;
+        }
+    }
+
+    // Open database
     result := SQLite.sqlite3_open(db_path.data, *db);
     if result != SQLite.SQLITE_OK {
         print("Failed to open database: %\n", db_path);
@@ -155,7 +168,11 @@ main :: () {
 
     print("Database opened successfully!\n");
 
-    // Ensure artwork_path column exists (migration)
+    // Create table if it doesn't exist (needed for fresh databases / tests)
+    create_sql := "CREATE TABLE IF NOT EXISTS records (id INTEGER PRIMARY KEY AUTOINCREMENT, number TEXT, artist TEXT, title TEXT, genre TEXT, year INTEGER, artwork_path TEXT)";
+    SQLite.sqlite3_exec(db, create_sql.data, null, null, null);
+
+    // Ensure artwork_path column exists (migration for older databases)
     migrate_sql := "ALTER TABLE records ADD COLUMN artwork_path TEXT";
     SQLite.sqlite3_exec(db, migrate_sql.data, null, null, null);
     // Ignore error - column may already exist
@@ -199,6 +216,9 @@ main :: () {
         last_time = current_time;
 
         Input.update_window_events();
+
+        // Run test step (injects synthetic events before they're processed)
+        if test_mode run_tests();
 
         for Input.get_window_resizes() {
             Simp.update_window(it.window);
@@ -248,6 +268,8 @@ main :: () {
         }
 
         draw_frame(dt);
+
+        if test_should_quit then quit = true;
 
         reset_temporary_storage();
         sleep_milliseconds(10);
