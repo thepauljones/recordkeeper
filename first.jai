@@ -15,12 +15,6 @@ build :: () {
     options := get_build_options(w);
     options.output_executable_name = "records";
 
-    // Import paths - add our local modules directory
-    import_path: [..] string;
-    array_add(*import_path, "modules");  // Our custom modules (SQLite)
-    array_add(*import_path, ..options.import_path);  // Default paths
-    options.import_path = import_path;
-
     #if OS == .MACOS {
         options.minimum_os_version = .{11, 0};  // Big Sur+ for Apple Silicon
     }

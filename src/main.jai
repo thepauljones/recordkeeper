@@ -7,10 +7,10 @@
 #import "String";
 #import "System";
 #import "Window_Creation";
+#import "Sort";
 
 Simp :: #import "Simp";
 Input :: #import "Input";
-SQLite :: #import "SQLite";
 Curl :: #import "Curl";
 #import "File";
 #import "File_Utilities";
@@ -32,8 +32,10 @@ small_font: *Simp.Dynamic_Font;
 search_text: string;
 search_scroll_value: float;
 
-// Database connection
-db: *SQLite.sqlite3;
+// CSV storage
+all_records: [..] Record;  // Master list, loaded from CSV at startup
+next_id: int = 1;          // Auto-increment ID
+csv_path: string;
 
 // Record data structure
 Record :: struct {
@@ -145,12 +147,12 @@ main :: () {
     }
 
     // Parse command line flags
-    db_path := ifx IS_TEST_BUILD then "data/test_records.db" else "data/records.db";
+    csv_path = ifx IS_TEST_BUILD then "data/test_records.csv" else "data/records.csv";
     test_mode = IS_TEST_BUILD;
     args := get_command_line_arguments();
     for i: 0..args.count-1 {
         if args[i] == "--db" && i + 1 < args.count {
-            db_path = args[i + 1];
+            csv_path = args[i + 1];
         }
         if args[i] == "--test" {
             test_mode = true;
@@ -160,30 +162,11 @@ main :: () {
         }
     }
 
-    // Open database
-    result := SQLite.sqlite3_open(db_path.data, *db);
-    if result != SQLite.SQLITE_OK {
-        print("Failed to open database: %\n", db_path);
-        return;
-    }
-    defer SQLite.sqlite3_close(db);
-
-    print("Database opened successfully!\n");
-
-    // Create table if it doesn't exist (needed for fresh databases / tests)
-    create_sql := "CREATE TABLE IF NOT EXISTS records (id INTEGER PRIMARY KEY AUTOINCREMENT, number TEXT, artist TEXT, title TEXT, genre TEXT, year INTEGER, artwork_path TEXT)";
-    SQLite.sqlite3_exec(db, create_sql.data, null, null, null);
-
-    // Ensure artwork_path column exists (migration for older databases)
-    migrate_sql := "ALTER TABLE records ADD COLUMN artwork_path TEXT";
-    SQLite.sqlite3_exec(db, migrate_sql.data, null, null, null);
-    // Ignore error - column may already exist
+    // Load records from CSV
+    load_csv();
 
     // Ensure artwork directory exists
     make_directory_if_it_does_not_exist("data/artwork");
-
-    // Get initial record count
-    get_total_record_count();
 
     // Mark stats as dirty for initial calculation
     collection_stats.dirty = true;
@@ -593,58 +576,62 @@ calculate_collection_stats :: () {
     if !collection_stats.dirty return;
     collection_stats.dirty = false;
 
-    // Total records
     collection_stats.total_records = total_record_count;
 
-    // Unique artists
-    {
-        sql := "SELECT COUNT(DISTINCT artist) FROM records";
-        stmt: *SQLite.sqlite3_stmt;
-        result := SQLite.sqlite3_prepare_v2(db, sql.data, cast(s32)sql.count, *stmt, null);
-        if result == SQLite.SQLITE_OK {
-            defer SQLite.sqlite3_finalize(stmt);
-            if SQLite.sqlite3_step(stmt) == SQLite.SQLITE_ROW {
-                collection_stats.unique_artists = SQLite.sqlite3_column_int(stmt, 0);
-            }
+    // Unique artists and year range in one pass
+    artist_names: [..] string;
+    defer array_free(artist_names);
+    year_min := 9999;
+    year_max := 0;
+
+    for rec: all_records {
+        // Unique artists (case-sensitive match is fine for counting)
+        found := false;
+        for artist_names { if it == rec.artist { found = true; break; } }
+        if !found array_add(*artist_names, rec.artist);
+
+        if rec.year > 0 {
+            if rec.year < year_min year_min = rec.year;
+            if rec.year > year_max year_max = rec.year;
         }
     }
+    collection_stats.unique_artists = artist_names.count;
 
-    // Year range
-    {
-        sql := "SELECT MIN(year), MAX(year) FROM records WHERE year > 0";
-        stmt: *SQLite.sqlite3_stmt;
-        result := SQLite.sqlite3_prepare_v2(db, sql.data, cast(s32)sql.count, *stmt, null);
-        if result == SQLite.SQLITE_OK {
-            defer SQLite.sqlite3_finalize(stmt);
-            if SQLite.sqlite3_step(stmt) == SQLite.SQLITE_ROW {
-                collection_stats.year_min = SQLite.sqlite3_column_int(stmt, 0);
-                collection_stats.year_max = SQLite.sqlite3_column_int(stmt, 1);
-            }
-        }
+    if year_min <= year_max {
+        collection_stats.year_min = year_min;
+        collection_stats.year_max = year_max;
+    } else {
+        collection_stats.year_min = 0;
+        collection_stats.year_max = 0;
     }
 
     // Top genres
-    {
-        // Free old genre strings
-        for i: 0..collection_stats.top_genre_count-1 {
-            if collection_stats.top_genres[i].data free(collection_stats.top_genres[i].data);
-            collection_stats.top_genres[i] = "";
-        }
-        collection_stats.top_genre_count = 0;
+    for i: 0..collection_stats.top_genre_count-1 {
+        if collection_stats.top_genres[i].data free(collection_stats.top_genres[i].data);
+        collection_stats.top_genres[i] = "";
+    }
+    collection_stats.top_genre_count = 0;
 
-        sql := "SELECT genre, COUNT(*) as cnt FROM records WHERE genre != '' GROUP BY genre ORDER BY cnt DESC LIMIT 5";
-        stmt: *SQLite.sqlite3_stmt;
-        result := SQLite.sqlite3_prepare_v2(db, sql.data, cast(s32)sql.count, *stmt, null);
-        if result == SQLite.SQLITE_OK {
-            defer SQLite.sqlite3_finalize(stmt);
-            while SQLite.sqlite3_step(stmt) == SQLite.SQLITE_ROW && collection_stats.top_genre_count < 5 {
-                genre_ptr := SQLite.sqlite3_column_text(stmt, 0);
-                if genre_ptr {
-                    collection_stats.top_genres[collection_stats.top_genre_count] = copy_string(to_string(genre_ptr));
-                    collection_stats.top_genre_count += 1;
-                }
-            }
+    Genre_Count :: struct { name: string; count: int; }
+    genre_counts: [..] Genre_Count;
+    defer array_free(genre_counts);
+
+    for rec: all_records {
+        if rec.genre.count == 0 continue;
+        found := false;
+        for * genre_counts {
+            if it.name == rec.genre { it.count += 1; found = true; break; }
         }
+        if !found array_add(*genre_counts, Genre_Count.{rec.genre, 1});
+    }
+
+    // Sort genres descending by count
+    quick_sort(genre_counts, (a: Genre_Count, b: Genre_Count) -> s64 { return cast(s64)(b.count - a.count); });
+
+    limit := min(5, genre_counts.count);
+    for i: 0..limit-1 {
+        collection_stats.top_genres[i] = copy_string(genre_counts[i].name);
+        collection_stats.top_genre_count += 1;
     }
 }
 
@@ -939,109 +926,62 @@ draw_footer :: (r: Rect) {
 }
 
 do_search :: (query: string) {
-    // Clear previous results
-    for * search_results {
-        if it.number.data free(it.number.data);
-        if it.artist.data free(it.artist.data);
-        if it.title.data  free(it.title.data);
-        if it.genre.data  free(it.genre.data);
-        if it.artwork_path.data free(it.artwork_path.data);
-    }
-    search_results.count = 0;
+    clear_search_results();
 
-    // Build query - search artist and title (case insensitive)
-    order_by := get_order_by_clause();
-    sql := tprint("SELECT id, number, artist, title, genre, year, artwork_path FROM records WHERE artist LIKE '\%%\%' OR title LIKE '\%%\%' %", query, query, order_by);
-
-    stmt: *SQLite.sqlite3_stmt;
-    result := SQLite.sqlite3_prepare_v2(db, sql.data, cast(s32)sql.count, *stmt, null);
-
-    if result != SQLite.SQLITE_OK {
-        print("SQL error: %\n", result);
-        return;
+    for all_records {
+        if contains_nocase(it.artist, query) || contains_nocase(it.title, query) {
+            array_add(*search_results, copy_record(it));
+        }
     }
 
-    defer SQLite.sqlite3_finalize(stmt);
-
-    while SQLite.sqlite3_step(stmt) == SQLite.SQLITE_ROW {
-        record: Record;
-        record.id = SQLite.sqlite3_column_int(stmt, 0);
-
-        // Get text columns - need to copy strings as SQLite memory is temporary
-        number_ptr := SQLite.sqlite3_column_text(stmt, 1);
-        artist_ptr := SQLite.sqlite3_column_text(stmt, 2);
-        title_ptr  := SQLite.sqlite3_column_text(stmt, 3);
-        genre_ptr  := SQLite.sqlite3_column_text(stmt, 4);
-        record.year = SQLite.sqlite3_column_int(stmt, 5);
-        artwork_ptr := SQLite.sqlite3_column_text(stmt, 6);
-
-        if number_ptr record.number = copy_string(to_string(number_ptr));
-        if artist_ptr record.artist = copy_string(to_string(artist_ptr));
-        if title_ptr  record.title  = copy_string(to_string(title_ptr));
-        if genre_ptr  record.genre  = copy_string(to_string(genre_ptr));
-        if artwork_ptr record.artwork_path = copy_string(to_string(artwork_ptr));
-
-        array_add(*search_results, record);
-    }
-
+    sort_search_results();
     print("Found % results for '%'\n", search_results.count, query);
 }
 
-get_order_by_clause :: () -> string {
-    if sort_mode == {
-        case .ARTIST_AZ;    return "ORDER BY artist COLLATE NOCASE, title COLLATE NOCASE";
-        case .ARTIST_ZA;    return "ORDER BY artist COLLATE NOCASE DESC, title COLLATE NOCASE";
-        case .YEAR_NEWEST;  return "ORDER BY year DESC, artist COLLATE NOCASE";
-        case .YEAR_OLDEST;  return "ORDER BY year ASC, artist COLLATE NOCASE";
+sort_search_results :: () {
+    compare_records :: (a: Record, b: Record) -> s64 {
+        if sort_mode == {
+            case .ARTIST_AZ;
+                c := compare_nocase(a.artist, b.artist);
+                if c != 0 return c;
+                return compare_nocase(a.title, b.title);
+            case .ARTIST_ZA;
+                c := compare_nocase(b.artist, a.artist);
+                if c != 0 return c;
+                return compare_nocase(a.title, b.title);
+            case .YEAR_NEWEST;
+                if a.year != b.year return ifx b.year > a.year then 1 else -1;
+                return compare_nocase(a.artist, b.artist);
+            case .YEAR_OLDEST;
+                if a.year != b.year return ifx a.year > b.year then 1 else -1;
+                return compare_nocase(a.artist, b.artist);
+        }
+        return 0;
     }
-    return "ORDER BY artist COLLATE NOCASE, title COLLATE NOCASE";
+    quick_sort(search_results, compare_records);
 }
 
 load_all_records :: () {
-    // Clear previous results
-    for * search_results {
-        if it.number.data free(it.number.data);
-        if it.artist.data free(it.artist.data);
-        if it.title.data  free(it.title.data);
-        if it.genre.data  free(it.genre.data);
-        if it.artwork_path.data free(it.artwork_path.data);
-    }
-    search_results.count = 0;
+    clear_search_results();
 
-    order_by := get_order_by_clause();
-    sql := tprint("SELECT id, number, artist, title, genre, year, artwork_path FROM records %", order_by);
-
-    stmt: *SQLite.sqlite3_stmt;
-    result := SQLite.sqlite3_prepare_v2(db, sql.data, cast(s32)sql.count, *stmt, null);
-
-    if result != SQLite.SQLITE_OK {
-        print("SQL error: %\n", result);
-        return;
+    for all_records {
+        array_add(*search_results, copy_record(it));
     }
 
-    defer SQLite.sqlite3_finalize(stmt);
-
-    while SQLite.sqlite3_step(stmt) == SQLite.SQLITE_ROW {
-        record: Record;
-        record.id = SQLite.sqlite3_column_int(stmt, 0);
-
-        number_ptr := SQLite.sqlite3_column_text(stmt, 1);
-        artist_ptr := SQLite.sqlite3_column_text(stmt, 2);
-        title_ptr  := SQLite.sqlite3_column_text(stmt, 3);
-        genre_ptr  := SQLite.sqlite3_column_text(stmt, 4);
-        record.year = SQLite.sqlite3_column_int(stmt, 5);
-        artwork_ptr := SQLite.sqlite3_column_text(stmt, 6);
-
-        if number_ptr record.number = copy_string(to_string(number_ptr));
-        if artist_ptr record.artist = copy_string(to_string(artist_ptr));
-        if title_ptr  record.title  = copy_string(to_string(title_ptr));
-        if genre_ptr  record.genre  = copy_string(to_string(genre_ptr));
-        if artwork_ptr record.artwork_path = copy_string(to_string(artwork_ptr));
-
-        array_add(*search_results, record);
-    }
-
+    sort_search_results();
     print("Loaded % records\n", search_results.count);
+}
+
+copy_record :: (src: Record) -> Record {
+    r: Record;
+    r.id = src.id;
+    r.year = src.year;
+    r.number = copy_string(src.number);
+    r.artist = copy_string(src.artist);
+    r.title  = copy_string(src.title);
+    r.genre  = copy_string(src.genre);
+    r.artwork_path = copy_string(src.artwork_path);
+    return r;
 }
 
 // Form helper functions
@@ -1358,93 +1298,60 @@ save_record :: () {
     collection_stats.dirty = true;
 }
 
-// Database operations
+// Data operations
 insert_record :: (number: string, artist: string, title: string, genre: string, year: int) {
-    sql := "INSERT INTO records (number, artist, title, genre, year) VALUES (?, ?, ?, ?, ?)";
-
-    stmt: *SQLite.sqlite3_stmt;
-    result := SQLite.sqlite3_prepare_v2(db, sql.data, cast(s32)sql.count, *stmt, null);
-    if result != SQLite.SQLITE_OK {
-        print("SQL prepare error: %\n", result);
-        return;
-    }
-    defer SQLite.sqlite3_finalize(stmt);
-
-    SQLite.sqlite3_bind_text(stmt, 1, number.data, cast(s32)number.count, null);
-    SQLite.sqlite3_bind_text(stmt, 2, artist.data, cast(s32)artist.count, null);
-    SQLite.sqlite3_bind_text(stmt, 3, title.data, cast(s32)title.count, null);
-    SQLite.sqlite3_bind_text(stmt, 4, genre.data, cast(s32)genre.count, null);
-    SQLite.sqlite3_bind_int(stmt, 5, cast(s32)year);
-
-    result = SQLite.sqlite3_step(stmt);
-    if result != SQLite.SQLITE_DONE {
-        print("SQL step error: %\n", result);
-    } else {
-        print("Record inserted successfully\n");
-    }
+    record: Record;
+    record.id = next_id;
+    next_id += 1;
+    record.number = copy_string(number);
+    record.artist = copy_string(artist);
+    record.title  = copy_string(title);
+    record.genre  = copy_string(genre);
+    record.year   = year;
+    array_add(*all_records, record);
+    total_record_count = all_records.count;
+    save_csv();
+    print("Record inserted successfully\n");
 }
 
 update_record :: (id: int, number: string, artist: string, title: string, genre: string, year: int) {
-    sql := "UPDATE records SET number=?, artist=?, title=?, genre=?, year=? WHERE id=?";
-
-    stmt: *SQLite.sqlite3_stmt;
-    result := SQLite.sqlite3_prepare_v2(db, sql.data, cast(s32)sql.count, *stmt, null);
-    if result != SQLite.SQLITE_OK {
-        print("SQL prepare error: %\n", result);
-        return;
+    for * all_records {
+        if it.id == id {
+            if it.number.data free(it.number.data);
+            if it.artist.data free(it.artist.data);
+            if it.title.data  free(it.title.data);
+            if it.genre.data  free(it.genre.data);
+            it.number = copy_string(number);
+            it.artist = copy_string(artist);
+            it.title  = copy_string(title);
+            it.genre  = copy_string(genre);
+            it.year   = year;
+            break;
+        }
     }
-    defer SQLite.sqlite3_finalize(stmt);
-
-    SQLite.sqlite3_bind_text(stmt, 1, number.data, cast(s32)number.count, null);
-    SQLite.sqlite3_bind_text(stmt, 2, artist.data, cast(s32)artist.count, null);
-    SQLite.sqlite3_bind_text(stmt, 3, title.data, cast(s32)title.count, null);
-    SQLite.sqlite3_bind_text(stmt, 4, genre.data, cast(s32)genre.count, null);
-    SQLite.sqlite3_bind_int(stmt, 5, cast(s32)year);
-    SQLite.sqlite3_bind_int(stmt, 6, cast(s32)id);
-
-    result = SQLite.sqlite3_step(stmt);
-    if result != SQLite.SQLITE_DONE {
-        print("SQL step error: %\n", result);
-    } else {
-        print("Record updated successfully\n");
-    }
+    save_csv();
+    print("Record updated successfully\n");
 }
 
 get_total_record_count :: () {
-    sql := "SELECT COUNT(*) FROM records";
-
-    stmt: *SQLite.sqlite3_stmt;
-    result := SQLite.sqlite3_prepare_v2(db, sql.data, cast(s32)sql.count, *stmt, null);
-    if result != SQLite.SQLITE_OK {
-        total_record_count = 0;
-        return;
-    }
-    defer SQLite.sqlite3_finalize(stmt);
-
-    if SQLite.sqlite3_step(stmt) == SQLite.SQLITE_ROW {
-        total_record_count = SQLite.sqlite3_column_int(stmt, 0);
-    }
+    total_record_count = all_records.count;
 }
 
 delete_record :: (id: int) {
-    sql := "DELETE FROM records WHERE id=?";
-
-    stmt: *SQLite.sqlite3_stmt;
-    result := SQLite.sqlite3_prepare_v2(db, sql.data, cast(s32)sql.count, *stmt, null);
-    if result != SQLite.SQLITE_OK {
-        print("SQL prepare error: %\n", result);
-        return;
+    for all_records {
+        if it.id == id {
+            if it.number.data free(it.number.data);
+            if it.artist.data free(it.artist.data);
+            if it.title.data  free(it.title.data);
+            if it.genre.data  free(it.genre.data);
+            if it.artwork_path.data free(it.artwork_path.data);
+            remove it;
+            break;
+        }
     }
-    defer SQLite.sqlite3_finalize(stmt);
-
-    SQLite.sqlite3_bind_int(stmt, 1, cast(s32)id);
-
-    result = SQLite.sqlite3_step(stmt);
-    if result != SQLite.SQLITE_DONE {
-        print("SQL step error: %\n", result);
-    } else {
-        print("Record deleted successfully\n");
-    }
+    total_record_count = all_records.count;
+    save_csv();
+    print("Record deleted successfully\n");
 }
 
 parse_int :: (s: string) -> int {
@@ -1994,25 +1901,15 @@ select_artwork :: (result: *Artwork_Result) {
 }
 
 update_record_artwork :: (id: int, artwork_path: string) {
-    sql := "UPDATE records SET artwork_path=? WHERE id=?";
-
-    stmt: *SQLite.sqlite3_stmt;
-    result := SQLite.sqlite3_prepare_v2(db, sql.data, cast(s32)sql.count, *stmt, null);
-    if result != SQLite.SQLITE_OK {
-        print("SQL prepare error: %\n", result);
-        return;
+    for * all_records {
+        if it.id == id {
+            if it.artwork_path.data free(it.artwork_path.data);
+            it.artwork_path = copy_string(artwork_path);
+            break;
+        }
     }
-    defer SQLite.sqlite3_finalize(stmt);
-
-    SQLite.sqlite3_bind_text(stmt, 1, artwork_path.data, cast(s32)artwork_path.count, null);
-    SQLite.sqlite3_bind_int(stmt, 2, cast(s32)id);
-
-    result = SQLite.sqlite3_step(stmt);
-    if result != SQLite.SQLITE_DONE {
-        print("SQL step error: %\n", result);
-    } else {
-        print("Artwork path updated for record %\n", id);
-    }
+    save_csv();
+    print("Artwork path updated for record %\n", id);
 }
 
 clear_artwork_results :: () {
@@ -2060,15 +1957,134 @@ make_c_string :: (s: string) -> *u8 {
 
 #load "../tests.jai";
 
-#scope_file
+// CSV storage functions
+load_csv :: () {
+    contents, success := read_entire_file(csv_path, log_errors=false);
+    if !success {
+        // No file yet — start with empty collection
+        total_record_count = 0;
+        print("No CSV file found at %, starting fresh\n", csv_path);
+        return;
+    }
+    defer free(contents.data);
 
-// Helper to convert C string to Jai string
-to_string :: (c_str: *u8) -> string {
-    if !c_str return "";
-    len := 0;
-    while c_str[len] != 0 len += 1;
-    result: string;
-    result.data = c_str;
-    result.count = len;
-    return result;
+    // Parse CSV line by line
+    i := 0;
+
+    // Skip header line
+    while i < contents.count && contents[i] != #char "\n" i += 1;
+    if i < contents.count i += 1;  // skip the \n
+
+    while i < contents.count {
+        // Skip empty lines
+        if contents[i] == #char "\n" || contents[i] == #char "\r" { i += 1; continue; }
+
+        // Parse 7 fields: id, number, artist, title, genre, year, artwork_path
+        id_str    := parse_csv_field(contents, *i);  defer free(id_str.data);
+        number    := parse_csv_field(contents, *i);
+        artist    := parse_csv_field(contents, *i);
+        title     := parse_csv_field(contents, *i);
+        genre     := parse_csv_field(contents, *i);
+        year_str  := parse_csv_field(contents, *i);  defer free(year_str.data);
+        art_path  := parse_csv_field(contents, *i);
+
+        // Skip to next line
+        while i < contents.count && contents[i] != #char "\n" i += 1;
+        if i < contents.count i += 1;
+
+        record: Record;
+        record.id = parse_int(id_str);
+        record.number = number;
+        record.artist = artist;
+        record.title  = title;
+        record.genre  = genre;
+        record.year   = parse_int(year_str);
+        record.artwork_path = art_path;
+
+        if record.id >= next_id next_id = record.id + 1;
+        array_add(*all_records, record);
+    }
+
+    total_record_count = all_records.count;
+    print("Loaded % records from %\n", all_records.count, csv_path);
+}
+
+parse_csv_field :: (data: string, cursor: *int) -> string {
+    i := cursor.*;
+    if i >= data.count { cursor.* = i; return copy_string(""); }
+
+    if data[i] == #char "\"" {
+        // Quoted field
+        i += 1;  // skip opening quote
+        builder: String_Builder;
+        while i < data.count {
+            if data[i] == #char "\"" {
+                if i + 1 < data.count && data[i+1] == #char "\"" {
+                    append(*builder, "\"");
+                    i += 2;
+                } else {
+                    i += 1;  // skip closing quote
+                    break;
+                }
+            } else {
+                append(*builder, data[i]);
+                i += 1;
+            }
+        }
+        if i < data.count && data[i] == #char "," i += 1;
+        cursor.* = i;
+        return builder_to_string(*builder);
+    } else {
+        // Unquoted field
+        start := i;
+        while i < data.count && data[i] != #char "," && data[i] != #char "\n" && data[i] != #char "\r" {
+            i += 1;
+        }
+        result := copy_string(slice(data, start, i - start));
+        if i < data.count && data[i] == #char "," i += 1;
+        cursor.* = i;
+        return result;
+    }
+}
+
+save_csv :: () {
+    builder: String_Builder;
+    append(*builder, "id,number,artist,title,genre,year,artwork_path\n");
+
+    for all_records {
+        print_to_builder(*builder, "%,%,%,%,%,%,%\n",
+            it.id,
+            csv_escape(it.number),
+            csv_escape(it.artist),
+            csv_escape(it.title),
+            csv_escape(it.genre),
+            it.year,
+            csv_escape(it.artwork_path));
+    }
+
+    write_entire_file(csv_path, *builder);
+}
+
+csv_escape :: (value: string) -> string {
+    needs_quoting := false;
+    for i: 0..value.count-1 {
+        c := value[i];
+        if c == #char "," || c == #char "\"" || c == #char "\n" {
+            needs_quoting = true;
+            break;
+        }
+    }
+    if !needs_quoting return value;
+
+    builder: String_Builder;
+    append(*builder, "\"");
+    for i: 0..value.count-1 {
+        if value[i] == #char "\"" {
+            append(*builder, "\"\"");
+        } else {
+            append(*builder, value[i]);
+        }
+    }
+    append(*builder, "\"");
+    return builder_to_string(*builder);
 }

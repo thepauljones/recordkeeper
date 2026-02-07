@@ -84,8 +84,17 @@ run_tests :: () {
     // ── Step 0: Clean DB, reset app state ────────────────────
     case 0;
         print("\n=== Step 0: Clean DB, reset app state ===\n");
-        clean_sql := "DELETE FROM records";
-        SQLite.sqlite3_exec(db, clean_sql.data, null, null, null);
+        // Clear all in-memory records
+        for * all_records {
+            if it.number.data free(it.number.data);
+            if it.artist.data free(it.artist.data);
+            if it.title.data  free(it.title.data);
+            if it.genre.data  free(it.genre.data);
+            if it.artwork_path.data free(it.artwork_path.data);
+        }
+        all_records.count = 0;
+        next_id = 1;
+        save_csv();
         clear_search_results();
         if search_text.data free(search_text.data);
         search_text = copy_string("");
