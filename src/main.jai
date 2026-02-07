@@ -147,7 +147,8 @@ main :: () {
     }
 
     // Parse command line flags
-    db_path := "data/records.db";
+    db_path := ifx IS_TEST_BUILD then "data/test_records.db" else "data/records.db";
+    test_mode = IS_TEST_BUILD;
     args := get_command_line_arguments();
     for i: 0..args.count-1 {
         if args[i] == "--db" && i + 1 < args.count {
@@ -155,6 +156,9 @@ main :: () {
         }
         if args[i] == "--test" {
             test_mode = true;
+        }
+        if args[i] == "--watchable" {
+            test_watchable = true;
         }
     }
 

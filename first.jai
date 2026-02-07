@@ -28,6 +28,7 @@ build :: () {
     set_build_options(options, w);
 
     compiler_begin_intercept(w);
+    add_build_string("IS_TEST_BUILD :: false;", w);
     add_build_file("src/main.jai", w);
 
     // Wait for compilation to finish
