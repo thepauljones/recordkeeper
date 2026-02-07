@@ -24,6 +24,9 @@ records.exe
 data/artwork/*.jpg
 data/artwork/*.png
 
+# Exclude test build
+test
+
 # No need to save the actual databasee
 data/*.db
 

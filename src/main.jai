@@ -664,7 +664,7 @@ draw_detail_placeholder :: (r: Rect) {
 
     // Total records
     stat_rect := get_rect(inner.x, current_y, inner.w, stat_h);
-    label(stat_rect, tprint("% records", collection_stats.total_records), *stat_theme);
+    label(stat_rect, tprint("% records", format_number(collection_stats.total_records)), *stat_theme);
     current_y -= stat_h;
 
     // Unique artists
@@ -918,9 +918,9 @@ draw_footer :: (r: Rect) {
     // Show total count when no search, otherwise show search results count
     count_text: string;
     if search_text.count < 2 {
-        count_text = tprint("% records", total_record_count);
+        count_text = tprint("% records", format_number(total_record_count));
     } else {
-        count_text = tprint("% records", search_results.count);
+        count_text = tprint("% records", format_number(search_results.count));
     }
     label(r, count_text, *count_theme);
 }
@@ -1363,6 +1363,24 @@ parse_int :: (s: string) -> int {
         }
     }
     return result;
+}
+
+format_number :: (n: int) -> string {
+    // Format integer with commas for thousands separators
+    if n < 1000 return tprint("%", n);
+
+    builder: String_Builder;
+    num_str := tprint("%", n);
+    count := num_str.count;
+
+    for i: 0..count-1 {
+        if i > 0 && (count - i) % 3 == 0 {
+            append(*builder, ",");
+        }
+        append(*builder, num_str[i]);
+    }
+
+    return builder_to_string(*builder);
 }
 
 // ============== ARTWORK FUNCTIONS ==============
