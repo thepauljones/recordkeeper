@@ -11,6 +11,11 @@ test_wait_frames: int = 0;
 test_failures: int = 0;
 test_total: int = 0;
 
+// Character-by-character typing state for watchable mode
+test_typing_target: string;   // Full string to type
+test_typing_pos: int = 0;     // How many characters typed so far
+test_typing_active: bool = false;
+
 test_assert :: (condition: bool, description: string) {
     test_total += 1;
     if condition {
@@ -60,20 +65,73 @@ test_click_cancel :: () {
     edit_mode = .NONE;
 }
 
-// Simulate typing into the search bar and pressing enter
-test_search :: (query: string) {
-    if search_text.data free(search_text.data);
-    search_text = copy_string(query);
-    if query.count >= 2 {
-        do_search(query);
+// Simulate typing into the search bar.
+// In watchable mode, starts character-by-character typing and returns true
+// to signal the caller to yield (return from the step without advancing).
+// When the step re-runs after typing completes, returns false and ensures
+// search results are fresh.
+test_search :: (query: string) -> bool {
+    if test_watchable {
+        // If already typed this exact query and not actively typing, we're done
+        if search_text == query && !test_typing_active {
+            // Re-execute search to ensure fresh results (data may have changed between steps)
+            if query.count >= 2 {
+                do_search(query);
+            } else {
+                clear_search_results();
+            }
+            return false;
+        }
+
+        // If not already typing this query, start fresh
+        if !test_typing_active || test_typing_target != query {
+            if test_typing_target.data free(test_typing_target.data);
+            test_typing_target = copy_string(query);
+            test_typing_pos = 0;
+            test_typing_active = true;
+            if search_text.data free(search_text.data);
+            search_text = copy_string("");
+            clear_search_results();
+        }
+        return true;  // Tell caller to yield
     } else {
-        clear_search_results();
+        // Instant mode
+        if search_text.data free(search_text.data);
+        search_text = copy_string(query);
+        if query.count >= 2 {
+            do_search(query);
+        } else {
+            clear_search_results();
+        }
+        return false;
     }
 }
 
 // Called each frame from the main loop
 run_tests :: () {
     if !test_mode return;
+
+    // Character-by-character typing animation (watchable mode)
+    if test_typing_active {
+        if test_typing_pos < test_typing_target.count {
+            test_typing_pos += 1;
+            // Update search_text to show typed-so-far
+            if search_text.data free(search_text.data);
+            partial: string;
+            partial.data = test_typing_target.data;
+            partial.count = test_typing_pos;
+            search_text = copy_string(partial);
+            // Trigger search when we have enough characters
+            if partial.count >= 2 {
+                do_search(partial);
+            }
+            test_wait_frames = 3;  // Small delay between keystrokes
+            return;
+        } else {
+            // Typing complete
+            test_typing_active = false;
+        }
+    }
 
     if test_wait_frames > 0 { test_wait_frames -= 1; return; }
 
@@ -134,7 +192,7 @@ run_tests :: () {
     // ── Step 3: Search for A, verify all fields ──────────────
     case 3;
         print("\n=== Step 3: Search for A, verify all fields ===\n");
-        test_search("Test Artist");
+        if test_search("Test Artist") return;
         test_assert(search_text == "Test Artist", "Search bar shows: Test Artist");
         test_assert(search_results.count == 1, "Search returns 1 result");
         if search_results.count > 0 {
@@ -148,14 +206,14 @@ run_tests :: () {
     // ── Step 4: Search nonexistent, verify empty ─────────────
     case 4;
         print("\n=== Step 4: Search nonexistent ===\n");
-        test_search("Nonexistent Band");
+        if test_search("Nonexistent Band") return;
         test_assert(search_text == "Nonexistent Band", "Search bar shows: Nonexistent Band");
         test_assert(search_results.count == 0, "Search for nonexistent returns 0");
 
     // ── Step 5: Open EDIT dialog for A with loaded values ────
     case 5;
         print("\n=== Step 5: Open EDIT dialog for A ===\n");
-        test_search("Test Artist");
+        if test_search("Test Artist") return;
         test_assert(search_results.count == 1, "Found record A to edit");
         if search_results.count > 0 {
             test_open_edit_dialog(search_results[0]);
@@ -186,7 +244,7 @@ run_tests :: () {
     // ── Step 8: Verify edit persisted in DB ──────────────────
     case 8;
         print("\n=== Step 8: Verify edit persisted ===\n");
-        test_search("Edited Artist");
+        if test_search("Edited Artist") return;
         test_assert(search_text == "Edited Artist", "Search bar shows: Edited Artist");
         test_assert(search_results.count == 1, "Edited record found by new name");
         if search_results.count > 0 {
@@ -199,7 +257,7 @@ run_tests :: () {
     // ── Step 9: Verify old name gone ─────────────────────────
     case 9;
         print("\n=== Step 9: Verify old name gone ===\n");
-        test_search("Test Artist");
+        if test_search("Test Artist") return;
         test_assert(search_results.count == 0, "Old artist name not found");
 
     // ── Step 10: Open ADD dialog, fill record B fields ───────
@@ -229,7 +287,7 @@ run_tests :: () {
     // ── Step 12: Search for B, verify all fields ─────────────
     case 12;
         print("\n=== Step 12: Verify record B in DB ===\n");
-        test_search("Second Artist");
+        if test_search("Second Artist") return;
         test_assert(search_text == "Second Artist", "Search bar shows: Second Artist");
         test_assert(search_results.count == 1, "Search for B returns 1 result");
         if search_results.count > 0 {
@@ -243,7 +301,7 @@ run_tests :: () {
     // ── Step 13: Open EDIT dialog for B ──────────────────────
     case 13;
         print("\n=== Step 13: Open EDIT dialog for B ===\n");
-        test_search("Second Artist");
+        if test_search("Second Artist") return;
         if search_results.count > 0 {
             test_open_edit_dialog(search_results[0]);
         }
@@ -265,7 +323,7 @@ run_tests :: () {
     // ── Step 16: Reopen EDIT for B — state-reset check ───────
     case 16;
         print("\n=== Step 16: Reopen EDIT for B (state-reset check) ===\n");
-        test_search("Second Artist");
+        if test_search("Second Artist") return;
         test_assert(search_results.count == 1, "Found B for reopen");
         if search_results.count > 0 {
             test_open_edit_dialog(search_results[0]);
@@ -284,7 +342,7 @@ run_tests :: () {
     // ── Step 18: Verify cancel didn't revert the DB ──────────
     case 18;
         print("\n=== Step 18: Verify close didn't revert ===\n");
-        test_search("Second Artist");
+        if test_search("Second Artist") return;
         test_assert(search_results.count == 1, "B still found after cancel");
         if search_results.count > 0 {
             test_assert(search_results[0].genre == "Jazz", "B genre still Jazz after cancel");
@@ -293,7 +351,7 @@ run_tests :: () {
     // ── Step 19: Back-to-back search state reset ─────────────
     case 19;
         print("\n=== Step 19: Back-to-back search state reset ===\n");
-        test_search("Edited");
+        if test_search("Edited") return;
         test_assert(search_text == "Edited", "Search bar shows: Edited");
         test_assert(search_results.count == 1, "Search for Edited finds A");
         if search_results.count > 0 {
@@ -303,7 +361,7 @@ run_tests :: () {
     // ── Step 20: Search for B after A ────────────────────────
     case 20;
         print("\n=== Step 20: Search switches to B ===\n");
-        test_search("Second");
+        if test_search("Second") return;
         test_assert(search_text == "Second", "Search bar shows: Second");
         test_assert(search_results.count == 1, "Search for Second finds B");
         if search_results.count > 0 {
@@ -313,7 +371,7 @@ run_tests :: () {
     // ── Step 21: Keyboard nav — inject DOWN arrow ────────────
     case 21;
         print("\n=== Step 21: Keyboard navigation (DOWN) ===\n");
-        test_search("Edited");
+        if test_search("Edited") return;
         test_assert(search_results.count > 0, "Have results for navigation test");
 
         selected_index = -1;
@@ -411,7 +469,7 @@ run_tests :: () {
     // ── Step 26: Delete record A, verify ─────────────────────
     case 26;
         print("\n=== Step 26: Delete record A ===\n");
-        test_search("Edited Artist");
+        if test_search("Edited Artist") return;
         test_assert(search_results.count == 1, "Found A for deletion");
         if search_results.count > 0 {
             delete_record(search_results[0].id);
@@ -422,13 +480,13 @@ run_tests :: () {
     // ── Step 27: Verify A gone from search ───────────────────
     case 27;
         print("\n=== Step 27: Verify A not searchable ===\n");
-        test_search("Edited Artist");
+        if test_search("Edited Artist") return;
         test_assert(search_results.count == 0, "A not searchable after delete");
 
     // ── Step 28: Delete record B, verify empty ───────────────
     case 28;
         print("\n=== Step 28: Delete record B ===\n");
-        test_search("Second Artist");
+        if test_search("Second Artist") return;
         test_assert(search_results.count == 1, "Found B for deletion");
         if search_results.count > 0 {
             delete_record(search_results[0].id);
@@ -436,17 +494,20 @@ run_tests :: () {
             test_assert(total_record_count == 0, "0 records after deleting B");
         }
 
-    // ── Step 29: Verify all gone from search ─────────────────
+    // ── Step 29: Verify Second gone from search ──────────────
     case 29;
         print("\n=== Step 29: Verify empty search results ===\n");
-        test_search("Second");
+        if test_search("Second") return;
         test_assert(search_results.count == 0, "No results for Second after delete");
-        test_search("Edited");
+
+    // ── Step 30: Verify Edited gone from search ────────────
+    case 30;
+        if test_search("Edited") return;
         test_assert(search_results.count == 0, "No results for Edited after delete");
 
-    // ── Step 30: Tab focus cycling ───────────────────────────
-    case 30;
-        print("\n=== Step 30: Tab focus cycling ===\n");
+    // ── Step 31: Tab focus cycling ───────────────────────────
+    case 31;
+        print("\n=== Step 31: Tab focus cycling ===\n");
         focused_field = 1;
 
         focused_field += 1;
@@ -464,8 +525,8 @@ run_tests :: () {
 
         edit_mode = .NONE;
 
-    // ── Step 31: Report results & exit ───────────────────────
-    case 31;
+    // ── Step 32: Report results & exit ───────────────────────
+    case 32;
         test_report_and_exit();
     }
 
