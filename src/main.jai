@@ -1212,27 +1212,8 @@ draw_add_edit_dialog :: (dialog_rect: Rect) {
     label_theme.font = main_font;
     label_theme.alignment = .Right;
 
-    // Number field
-    draw_form_field(inner.x, current_y, label_width, input_width, field_height, "Number:", *form_number, *label_theme, *text_theme, 1);
-    current_y -= field_height + field_spacing;
-
-    // Artist field
-    draw_form_field(inner.x, current_y, label_width, input_width, field_height, "Artist:", *form_artist, *label_theme, *text_theme, 2);
-    current_y -= field_height + field_spacing;
-
-    // Title field
-    draw_form_field(inner.x, current_y, label_width, input_width, field_height, "Title:", *form_title, *label_theme, *text_theme, 3);
-    current_y -= field_height + field_spacing;
-
-    // Genre field
-    draw_form_field(inner.x, current_y, label_width, input_width, field_height, "Genre:", *form_genre, *label_theme, *text_theme, 4);
-    current_y -= field_height + field_spacing;
-
-    // Year field
-    draw_form_field(inner.x, current_y, label_width, input_width, field_height, "Year:", *form_year, *label_theme, *text_theme, 5);
-    current_y -= field_height + field_spacing;
-
-    // Handle Tab / Shift+Tab to cycle through form fields
+    // Handle Tab / Shift+Tab to cycle through form fields (before drawing so we can activate the target)
+    tab_activated := false;
     for Input.events_this_frame {
         if it.type == .KEYBOARD && it.key_pressed && it.key_code == .TAB {
             if it.shift_pressed {
@@ -1242,8 +1223,29 @@ draw_add_edit_dialog :: (dialog_rect: Rect) {
                 focused_field += 1;
                 if focused_field > 5 focused_field = 1;
             }
+            tab_activated = true;
         }
     }
+
+    // Number field
+    draw_form_field(inner.x, current_y, label_width, input_width, field_height, "Number:", *form_number, *label_theme, *text_theme, 1, tab_activated);
+    current_y -= field_height + field_spacing;
+
+    // Artist field
+    draw_form_field(inner.x, current_y, label_width, input_width, field_height, "Artist:", *form_artist, *label_theme, *text_theme, 2, tab_activated);
+    current_y -= field_height + field_spacing;
+
+    // Title field
+    draw_form_field(inner.x, current_y, label_width, input_width, field_height, "Title:", *form_title, *label_theme, *text_theme, 3, tab_activated);
+    current_y -= field_height + field_spacing;
+
+    // Genre field
+    draw_form_field(inner.x, current_y, label_width, input_width, field_height, "Genre:", *form_genre, *label_theme, *text_theme, 4, tab_activated);
+    current_y -= field_height + field_spacing;
+
+    // Year field
+    draw_form_field(inner.x, current_y, label_width, input_width, field_height, "Year:", *form_year, *label_theme, *text_theme, 5, tab_activated);
+    current_y -= field_height + field_spacing;
 
     // Find Artwork button (only in edit mode for existing records)
     // Positioned below the Year field
@@ -1286,7 +1288,7 @@ draw_add_edit_dialog :: (dialog_rect: Rect) {
     }
 }
 
-draw_form_field :: (x: float, y: float, label_width: float, input_width: float, height: float, label_text: string, field: *string, label_theme: *Label_Theme, text_theme: *Text_Input_Theme, identifier: int) {
+draw_form_field :: (x: float, y: float, label_width: float, input_width: float, height: float, label_text: string, field: *string, label_theme: *Label_Theme, text_theme: *Text_Input_Theme, identifier: int, tab_activated: bool = false) {
     // Label
     label_rect := get_rect(x, y, label_width - 10, height);
     label(label_rect, label_text, label_theme);
@@ -1295,7 +1297,8 @@ draw_form_field :: (x: float, y: float, label_width: float, input_width: float, 
     input_rect := get_rect(x + label_width, y, input_width, height);
 
     // Draw teal highlight border around the focused field
-    if identifier == focused_field {
+    is_focused := identifier == focused_field;
+    if is_focused {
         Simp.set_shader_for_color();
         border := 2.0;
         // Bottom edge
@@ -1308,7 +1311,11 @@ draw_form_field :: (x: float, y: float, label_width: float, input_width: float, 
         Simp.immediate_quad(.{input_rect.x + input_rect.w - border, input_rect.y}, .{input_rect.x + input_rect.w, input_rect.y}, .{input_rect.x + input_rect.w, input_rect.y + input_rect.h}, .{input_rect.x + input_rect.w - border, input_rect.y + input_rect.h}, COLOR_ACCENT);
     }
 
-    action, new_text, state := text_input(input_rect, field.*, text_theme, identifier);
+    // Activate the focused field when tab was pressed so it receives keyboard input
+    activate_action: Text_Input_Action;
+    if is_focused && tab_activated  activate_action = .ACTIVATE;
+
+    action, new_text, state := text_input(input_rect, field.*, text_theme, identifier, input_action = activate_action);
 
     // Update focused_field when user clicks/interacts with this field
     if action {
